@@ -6,6 +6,10 @@ import numpy as np
 import mss
 import win32gui
 from ultralytics import YOLO
+import threading
+from flask import Flask
+from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 
 # -------------------- SUMO SETUP --------------------
 if 'SUMO_HOME' in os.environ:
@@ -21,6 +25,20 @@ MAX_GREEN = 60
 YELLOW = 3
 EMERGENCY_HOLD = 10
 DENSITY_FACTOR = 2.0
+
+# -------------------- WEB SERVER --------------------
+app = Flask(__name__)
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
+traffic_state = {
+    "phases": {"N": "red", "S": "red", "E": "red", "W": "red"},
+    "densities": {"N": 0, "S": 0, "E": 0, "W": 0},
+    "reason": "Initializing",
+    "step": 0
+}
+
+def start_server():
+    socketio.run(app, port=5000, debug=False, use_reloader=False)
 
 # -------------------- VISION AGENT --------------------
 class VisionAgent:
@@ -175,6 +193,12 @@ def run():
 
     vision = VisionAgent()
     decision = DecisionAgent()
+    
+    # Start web server thread
+    server_thread = threading.Thread(target=start_server, daemon=True)
+    server_thread.start()
+    print("[INFO] Web dashboard server started on http://localhost:5000", flush=True)
+
     traci.trafficlight.setPhase(TL_ID, 0)
     vision.initialize_window()
     
@@ -221,8 +245,15 @@ def run():
             elif current_phase_idx == 6: ui_phases["W"] = "green"
             elif current_phase_idx == 7: ui_phases["W"] = "yellow"
 
-            # Log current state to console
-            print(f"Step {step} | Phases: {ui_phases} | Densities: {densities} | Reason: {reason}", flush=True)
+            # Log current state to console and broadcast to web
+            traffic_state.update({
+                "phases": ui_phases,
+                "densities": {k: float(round(v, 2)) for k, v in densities.items()},
+                "reason": reason,
+                "step": step
+            })
+            socketio.emit('traffic_update', traffic_state)
+            print(f"Step {step} | Phases: {ui_phases} | Densities: {traffic_state['densities']} | Reason: {reason}", flush=True)
 
             annotated = vision.draw_rois(annotated)
             cv2.imshow("Vision Analytics", annotated)
